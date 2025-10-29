@@ -1,0 +1,19 @@
+# Core AI + LLM
+langchain
+openai
+chromadb
+
+# Speech-to-text
+whisper
+
+# Web app
+streamlit
+
+# Data handling
+pandas
+pydantic
+python-dotenv
+
+# Optional utilities
+tqdm
+requests
