@@ -1,0 +1,19 @@
+# Environment & secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+
+# Data & cache
+data/audio/
+data/transcripts/*.wav
+data/transcripts/*.mp3
+data/transcripts/*.json
+*.log
