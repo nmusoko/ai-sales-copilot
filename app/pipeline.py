@@ -136,3 +136,95 @@ CONTENT TO FIX:
             raise ValueError(f"Failed to parse LLM output after one repair attempt: {e2}") from e
     except ValidationError as ve:
         raise ValueError(f"Validation error: {ve}") from ve
+# --- Email Draft schema & chain ---
+
+class EmailDraft(BaseModel):
+    subject: str = Field(..., description="Professional subject line for the follow-up")
+    body_markdown: str = Field(..., description="Complete email body in Markdown with greeting, body, bullets if useful, and a courteous sign-off")
+
+email_parser = PydanticOutputParser(pydantic_object=EmailDraft)
+
+EMAIL_SYSTEM = """You are an expert B2B sales assistant.
+Return ONLY valid JSON matching the provided schema.
+Write concise, professional emails in the requested tone.
+Do not invent facts. Base content on the provided context."""
+
+EMAIL_TMPL = """Context for the email:
+- Summary of call:
+{summary}
+
+- Overall sentiment: {sentiment}
+
+- Next steps we captured: {next_steps}
+
+- Desired tone: {tone}  (one of: friendly, formal, concise, persuasive)
+
+Write a follow-up email to the client. The email should:
+- Recap key outcomes accurately
+- Acknowledge any objections/concerns gently
+- Propose the next steps clearly (dates if available)
+- Keep it short (120–220 words)
+- Use the provided tone
+
+{format_instructions}
+"""
+
+email_prompt = PromptTemplate(
+    template=EMAIL_TMPL,
+    input_variables=["summary", "sentiment", "next_steps", "tone"],
+    partial_variables={"format_instructions": email_parser.get_format_instructions()},
+)
+
+def make_email_chain(llm: Optional[ChatOpenAI] = None) -> Runnable:
+    llm = llm or make_llm()
+    return email_prompt | llm | email_parser
+
+def generate_email_with_llm(
+    summary: str,
+    sentiment: str,
+    next_steps: list[str],
+    tone: str = "friendly",
+    model_name: str = "gpt-4o-mini",
+) -> dict:
+    """
+    Produce an EmailDraft dict {subject, body_markdown} with one repair attempt.
+    """
+    chain = make_email_chain(make_llm(model_name=model_name))
+    payload = {
+        "summary": summary,
+        "sentiment": sentiment,
+        "next_steps": "\n".join(f"- {s}" for s in (next_steps or [])),
+        "tone": tone,
+    }
+
+    # try normal path with small backoff like before
+    import time
+    delays = [0, 2]
+    last_err = None
+    for d in delays:
+        try:
+            if d: time.sleep(d)
+            result: EmailDraft = chain.invoke(payload)
+            return json.loads(result.model_dump_json())
+        except Exception as e:
+            last_err = e
+            if "insufficient_quota" in str(e).lower() or "rate limit" in str(e).lower() or "429" in str(e):
+                continue
+            break
+
+    # repair once
+    try:
+        fix_prompt = f"""Reformat the content below into EXACTLY the required JSON schema for EmailDraft.
+
+SCHEMA:
+{email_parser.get_format_instructions()}
+
+CONTENT TO FIX:
+{str(last_err)}
+"""
+        llm = make_llm(model_name=model_name)
+        fixed_text = llm.invoke(fix_prompt).content
+        fixed = email_parser.parse(fixed_text)
+        return json.loads(fixed.model_dump_json())
+    except Exception as e2:
+        raise RuntimeError("LLM email generation failed. Use stub or fix quota.") from e2

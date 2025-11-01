@@ -1,14 +1,14 @@
 # main.py
-# Streamlit viewer for transcripts → summary/sentiment/next-steps (Stub or LLM)
+# Streamlit viewer for transcripts → summary/sentiment/next-steps + follow-up email
+# Works with Stub or LLM, with graceful fallback.
 
 import json
-import os
-from pathlib import Path
 import streamlit as st
 
-from app.pipeline import summarize_with_llm
 from app.loader import list_transcript_packages, load_transcript_by_stem
 from app.summarize_stub import summarize_transcript
+from app.pipeline import summarize_with_llm, generate_email_with_llm
+from app.email_stub import email_stub
 
 
 # -----------------------------
@@ -60,22 +60,23 @@ def to_json(summary: str, sentiment: str, key_phrases: list[str], next_steps: li
 # -----------------------------
 st.set_page_config(page_title="AI Sales Copilot", layout="wide")
 st.title("🤖 AI Sales Copilot — Transcript Viewer")
-st.caption("Upload or select an existing transcript to preview summary, sentiment, and next steps. Toggle LLM when available.")
+st.caption("Upload or select a transcript to preview summary, sentiment, next steps, and a follow-up email. Toggle LLM when available.")
 
 tab_select, tab_upload = st.tabs(["Select Existing", "Upload .txt Transcript"])
 
+# ============================
+# Tab: Select Existing
+# ============================
 with tab_select:
-    # List all known transcripts from data/transcripts
     pkgs = list(list_transcript_packages())
     if not pkgs:
         st.info("No transcripts found in `data/transcripts/`. Use the Upload tab or run the Whisper step first.")
     else:
         options = [p.stem for p in pkgs]
-        choice = st.selectbox("Choose a transcript:", options)
+        choice = st.selectbox("Choose a transcript:", options, key="choice_existing")
         if choice:
             pkg = load_transcript_by_stem(choice)
 
-            # Left: metadata; Right: analysis
             left, right = st.columns([1, 2], gap="large")
             with left:
                 st.subheader("Metadata")
@@ -92,12 +93,15 @@ with tab_select:
             with right:
                 st.subheader("Analysis")
 
+                # Toggle for LLM summary
                 use_llm = st.toggle(
                     "Use LLM (LangChain)",
                     value=False,
-                    help="Turn on to use the real LLM summarizer. If it fails (e.g., quota), the app will fall back to the stub."
+                    help="Turn on to use the real LLM summarizer. If it fails (e.g., quota), the app will fall back to the stub.",
+                    key="analysis_llm_existing"
                 )
 
+                # Run analysis (LLM or Stub) with fallback
                 try:
                     if use_llm:
                         out = summarize_with_llm(pkg.text, model_name="gpt-4o-mini")
@@ -113,7 +117,7 @@ with tab_select:
                     st.caption("Stub (fallback after LLM error)")
                     summary_text = out.get("summary", "")
 
-                # Render results (works for both LLM and Stub outputs)
+                # Render analysis
                 st.markdown("### Summary")
                 st.code(summary_text or "(empty)", language="markdown")
 
@@ -134,25 +138,97 @@ with tab_select:
                 else:
                     st.write("(none)")
 
-                # Downloads
+                # Downloads for analysis
                 st.divider()
-                md = to_markdown(summary_text, out.get("sentiment", "Neutral"), out.get("key_phrases", []), steps)
-                js = to_json(summary_text, out.get("sentiment", "Neutral"), out.get("key_phrases", []), steps, meta=pkg.meta.model_dump())
+                md = to_markdown(summary_text, out.get("sentiment", "Neutral"), kp, steps)
+                js = to_json(summary_text, out.get("sentiment", "Neutral"), kp, steps, meta=pkg.meta.model_dump())
                 colA, colB = st.columns(2)
                 with colA:
                     st.download_button("⬇️ Download as Markdown", data=md, file_name=f"{pkg.stem}_summary.md", mime="text/markdown")
                 with colB:
                     st.download_button("⬇️ Download as JSON", data=js, file_name=f"{pkg.stem}_summary.json", mime="application/json")
 
+                # -------------------------
+                # Email section
+                # -------------------------
+                st.markdown("## 📧 Follow-up Email")
+
+                email_tone = st.selectbox(
+                    "Tone",
+                    options=["friendly", "formal", "concise", "persuasive"],
+                    index=0,
+                    help="Choose how the email should sound.",
+                    key="tone_existing"
+                )
+                use_llm_email = st.toggle(
+                    "Use LLM for Email",
+                    value=False,
+                    help="Turn on to generate the email with the LLM; otherwise use the stub.",
+                    key="llm_email_existing"
+                )
+
+                try:
+                    if use_llm_email:
+                        email_out = generate_email_with_llm(
+                            summary=summary_text,
+                            sentiment=out.get("sentiment", "Neutral"),
+                            next_steps=steps,
+                            tone=email_tone,
+                            model_name="gpt-4o-mini"
+                        )
+                        st.caption("Email powered by LangChain + OpenAI")
+                    else:
+                        email_out = email_stub(
+                            summary=summary_text,
+                            sentiment=out.get("sentiment", "Neutral"),
+                            next_steps=steps,
+                            tone=email_tone
+                        )
+                        st.caption("Email (stub)")
+                except RuntimeError:
+                    st.warning("LLM unavailable for email (quota/rate-limit). Using stub automatically.")
+                    email_out = email_stub(
+                        summary=summary_text,
+                        sentiment=out.get("sentiment", "Neutral"),
+                        next_steps=steps,
+                        tone=email_tone
+                    )
+                    st.caption("Email (stub fallback)")
+
+                st.markdown("**Subject**")
+                st.code(email_out.get("subject") or "(empty)", language="markdown")
+                st.markdown("**Body (Markdown)**")
+                st.code(email_out.get("body_markdown") or "(empty)", language="markdown")
+
+                # Download buttons for the email
+                st.divider()
+                colE1, colE2 = st.columns(2)
+                colE1.download_button(
+                    "⬇️ Download Email (.md)",
+                    data=email_out.get("body_markdown", ""),
+                    file_name=f"{pkg.stem}_email.md",
+                    mime="text/markdown"
+                )
+                colE2.download_button(
+                    "⬇️ Download Email (.json)",
+                    data=json.dumps(email_out, indent=2),
+                    file_name=f"{pkg.stem}_email.json",
+                    mime="application/json"
+                )
+
+# ============================
+# Tab: Upload
+# ============================
 with tab_upload:
     st.write("Upload a plain text transcript (.txt).")
-    up = st.file_uploader("Choose .txt file", type=["txt"])
+    up = st.file_uploader("Choose .txt file", type=["txt"], key="uploader_txt")
     if up is not None:
         text = up.read().decode("utf-8", errors="ignore")
         st.success("Transcript loaded from upload.")
 
-        # For uploaded text, let user choose Stub vs LLM too (optional)
-        use_llm_upload = st.toggle("Use LLM (for uploaded text)", value=False)
+        # Toggle for LLM summary (upload)
+        use_llm_upload = st.toggle("Use LLM (for uploaded text)", value=False, key="analysis_llm_upload")
+
         try:
             if use_llm_upload:
                 out = summarize_with_llm(text, model_name="gpt-4o-mini")
@@ -188,7 +264,7 @@ with tab_upload:
         else:
             st.write("(none)")
 
-        # Export buttons for uploaded text (no meta)
+        # Downloads for analysis (upload)
         st.divider()
         md = to_markdown(summary_text, out.get("sentiment", "Neutral"), kp, steps)
         js = to_json(summary_text, out.get("sentiment", "Neutral"), kp, steps, meta={"source": "upload"})
@@ -197,3 +273,70 @@ with tab_upload:
             st.download_button("⬇️ Download as Markdown", data=md, file_name="upload_summary.md", mime="text/markdown")
         with colB:
             st.download_button("⬇️ Download as JSON", data=js, file_name="upload_summary.json", mime="application/json")
+
+        # -------------------------
+        # Email section (upload)
+        # -------------------------
+        st.markdown("## 📧 Follow-up Email")
+        email_tone_up = st.selectbox(
+            "Tone",
+            options=["friendly", "formal", "concise", "persuasive"],
+            index=0,
+            help="Choose how the email should sound.",
+            key="tone_upload"
+        )
+        use_llm_email_up = st.toggle(
+            "Use LLM for Email",
+            value=False,
+            help="Turn on to generate the email with the LLM; otherwise use the stub.",
+            key="llm_email_upload"
+        )
+
+        try:
+            if use_llm_email_up:
+                email_out = generate_email_with_llm(
+                    summary=summary_text,
+                    sentiment=out.get("sentiment", "Neutral"),
+                    next_steps=steps,
+                    tone=email_tone_up,
+                    model_name="gpt-4o-mini"
+                )
+                st.caption("Email powered by LangChain + OpenAI")
+            else:
+                email_out = email_stub(
+                    summary=summary_text,
+                    sentiment=out.get("sentiment", "Neutral"),
+                    next_steps=steps,
+                    tone=email_tone_up
+                )
+                st.caption("Email (stub)")
+        except RuntimeError:
+            st.warning("LLM unavailable for email (quota/rate-limit). Using stub automatically.")
+            email_out = email_stub(
+                summary=summary_text,
+                sentiment=out.get("sentiment", "Neutral"),
+                next_steps=steps,
+                tone=email_tone_up
+            )
+            st.caption("Email (stub fallback)")
+
+        st.markdown("**Subject**")
+        st.code(email_out.get("subject") or "(empty)", language="markdown")
+        st.markdown("**Body (Markdown)**")
+        st.code(email_out.get("body_markdown") or "(empty)", language="markdown")
+
+        # Download buttons for the email (upload)
+        st.divider()
+        colE1, colE2 = st.columns(2)
+        colE1.download_button(
+            "⬇️ Download Email (.md)",
+            data=email_out.get("body_markdown", ""),
+            file_name="upload_email.md",
+            mime="text/markdown"
+        )
+        colE2.download_button(
+            "⬇️ Download Email (.json)",
+            data=json.dumps(email_out, indent=2),
+            file_name="upload_email.json",
+            mime="application/json"
+        )
