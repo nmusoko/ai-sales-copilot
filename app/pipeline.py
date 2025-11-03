@@ -31,8 +31,6 @@ except ImportError:
 # 1) Load environment
 # ---------------------------
 load_dotenv()  # allows OPENAI_API_KEY from .env
-# If you use IBM watsonx later, this is the place to load those creds.
-
 
 # ---------------------------
 # 2) Define the structured output (Pydantic)
@@ -228,3 +226,99 @@ CONTENT TO FIX:
         return json.loads(fixed.model_dump_json())
     except Exception as e2:
         raise RuntimeError("LLM email generation failed. Use stub or fix quota.") from e2
+
+# --- QA over retrieved chunks ---
+
+from pydantic import BaseModel, Field
+from typing import List, Dict
+
+class QACitation(BaseModel):
+    stem: str = Field(..., description="Transcript base name")
+    chunk_id: str = Field(..., description="Chunk identifier like 'sample_call:0'")
+    quote: str = Field(..., description="Short supporting quote (≤300 chars)")
+
+class QAAnswer(BaseModel):
+    answer: str = Field(..., description="Concise answer grounded in the provided context")
+    citations: List[QACitation] = Field(default_factory=list, description="Supporting citations (stem/chunk/quote)")
+
+qa_parser = PydanticOutputParser(pydantic_object=QAAnswer)
+
+QA_TMPL = """You are a precise analyst. Answer the user's question ONLY using the CONTEXT below.
+If the answer is not contained in the context, say "I don't see that in the transcripts."
+
+QUESTION:
+{question}
+
+CONTEXT (top {k} chunks):
+{context}
+
+{format_instructions}
+"""
+
+qa_prompt = PromptTemplate(
+    template=QA_TMPL,
+    input_variables=["question", "context", "k"],
+    partial_variables={"format_instructions": qa_parser.get_format_instructions()},
+)
+
+def make_qa_chain(llm: Optional[ChatOpenAI] = None) -> Runnable:
+    llm = llm or make_llm()
+    return qa_prompt | llm | qa_parser
+
+def generate_qa_with_llm(question: str, hits: List[Dict], model_name: str = "gpt-4o-mini") -> dict:
+    """
+    hits: list of { 'text': str, 'score': float, 'metadata': {...} } from memory.search_similar
+    Returns: { answer: str, citations: [{stem, chunk_id, quote}] }
+    """
+    if not hits:
+        return {"answer": "I don't see that in the transcripts.", "citations": []}
+
+    # Build a compact context with metadata headers
+    blocks = []
+    for h in hits:
+        meta = h["metadata"]
+        header = f"[{meta.get('stem','?')} | {meta.get('chunk_id','?')} | score={h.get('score',0):.4f}]"
+        text = h["text"].replace("\n", " ")
+        if len(text) > 800:
+            text = text[:800] + " …"
+        blocks.append(header + "\n" + text)
+
+    payload = {
+        "question": question.strip(),
+        "context": "\n\n".join(blocks),
+        "k": str(len(hits)),
+    }
+
+    # Light retry + one repair attempt (same pattern as before)
+    import time
+    delays = [0, 2]
+    last_err = None
+    chain = make_qa_chain(make_llm(model_name=model_name))
+    for d in delays:
+        try:
+            if d: time.sleep(d)
+            result: QAAnswer = chain.invoke(payload)
+            return json.loads(result.model_dump_json())
+        except Exception as e:
+            last_err = e
+            if "insufficient_quota" in str(e).lower() or "rate limit" in str(e).lower() or "429" in str(e):
+                continue
+            break
+
+    # repair attempt
+    try:
+        fix_prompt = f"""Reformat the content below into EXACTLY the required JSON schema for QAAnswer.
+
+SCHEMA:
+{qa_parser.get_format_instructions()}
+
+CONTENT TO FIX:
+{str(last_err)}
+"""
+        llm = make_llm(model_name=model_name)
+        fixed_text = llm.invoke(fix_prompt).content
+        fixed = qa_parser.parse(fixed_text)
+        return json.loads(fixed.model_dump_json())
+    except Exception:
+        # Fallback minimal answer
+        return {"answer": "I don't see that in the transcripts.", "citations": []}

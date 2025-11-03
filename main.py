@@ -7,8 +7,13 @@ import streamlit as st
 
 from app.loader import list_transcript_packages, load_transcript_by_stem
 from app.summarize_stub import summarize_transcript
-from app.pipeline import summarize_with_llm, generate_email_with_llm
+from app.pipeline import (
+    summarize_with_llm,
+    generate_email_with_llm,
+    generate_qa_with_llm,  # QA chain for Knowledge Search
+)
 from app.email_stub import email_stub
+from app.memory import search_similar, qa_stub_answer  # vector search + stub QA
 
 
 # -----------------------------
@@ -60,9 +65,10 @@ def to_json(summary: str, sentiment: str, key_phrases: list[str], next_steps: li
 # -----------------------------
 st.set_page_config(page_title="AI Sales Copilot", layout="wide")
 st.title("🤖 AI Sales Copilot — Transcript Viewer")
-st.caption("Upload or select a transcript to preview summary, sentiment, next steps, and a follow-up email. Toggle LLM when available.")
+st.caption("Upload or select a transcript to preview summary, sentiment, next steps, a follow-up email, and search across calls. Toggle LLM when available.")
 
-tab_select, tab_upload = st.tabs(["Select Existing", "Upload .txt Transcript"])
+tab_select, tab_upload, tab_search = st.tabs(["Select Existing", "Upload .txt Transcript", "Knowledge Search"])
+
 
 # ============================
 # Tab: Select Existing
@@ -216,6 +222,7 @@ with tab_select:
                     mime="application/json"
                 )
 
+
 # ============================
 # Tab: Upload
 # ============================
@@ -340,3 +347,57 @@ with tab_upload:
             file_name="upload_email.json",
             mime="application/json"
         )
+
+
+# ============================
+# Tab: Knowledge Search
+# ============================
+with tab_search:
+    st.write("Search across indexed transcripts (FAISS). First, index transcripts via Day 4 Step 1.")
+
+    colq1, colq2 = st.columns([3, 1], gap="small")
+    with colq1:
+        question = st.text_input(
+            "Ask a question about your calls:",
+            key="qa_question",
+            placeholder="e.g., What did the client say about refunds?"
+        )
+    with colq2:
+        topk = st.number_input("Top K", min_value=1, max_value=10, value=5, step=1, key="qa_topk")
+
+    use_llm_qa = st.toggle("Use LLM to synthesize answer", value=False, key="qa_use_llm")
+
+    if st.button("Search", key="qa_search_btn"):
+        if not question.strip():
+            st.warning("Please enter a question.")
+        else:
+            hits = search_similar(question, k=int(topk))
+            if not hits:
+                st.info("No index found or no matches. Index your transcripts first.")
+            else:
+                st.subheader("Top Matches")
+                for i, h in enumerate(hits, 1):
+                    meta = h["metadata"]
+                    with st.expander(f"[{i}] {meta.get('stem','?')} • {meta.get('chunk_id','?')} • score={h.get('score',0):.4f}"):
+                        st.write(h["text"])
+
+                st.subheader("Answer")
+                try:
+                    if use_llm_qa:
+                        qa = generate_qa_with_llm(question, hits, model_name="gpt-4o-mini")
+                        st.caption("Answer powered by LangChain + OpenAI")
+                    else:
+                        qa = qa_stub_answer(question, hits)
+                        st.caption("Stub (deterministic)")
+                except Exception:
+                    st.warning("LLM unavailable. Falling back to stub.")
+                    qa = qa_stub_answer(question, hits)
+                    st.caption("Stub (fallback)")
+
+                st.markdown("**Answer**")
+                st.code(qa.get("answer") or "(empty)", language="markdown")
+
+                if qa.get("citations"):
+                    st.markdown("**Citations**")
+                    for c in qa["citations"]:
+                        st.markdown(f"- **{c.get('stem','?')} / {c.get('chunk_id','?')}** — “{c.get('quote','')}”")

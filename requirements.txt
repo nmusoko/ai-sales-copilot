@@ -17,3 +17,11 @@ python-dotenv
 # Optional utilities
 tqdm
 requests
+
+langchain-community
+langchain-text-splitters
+faiss-cpu
+langchain-huggingface
+sentence-transformers
+# (optional if you want OpenAI embeddings)
+langchain-openai
