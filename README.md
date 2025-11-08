@@ -1,3 +1,5 @@
+![CI](https://github.com/nmusoko/ai-sales-copilot/actions/workflows/ci.yml/badge.svg)
+
 # 🤖 AI Sales Copilot  
 ### *LangChain · Whisper · Streamlit · Python*
 
