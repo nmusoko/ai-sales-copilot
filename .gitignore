@@ -17,3 +17,18 @@ data/transcripts/*.wav
 data/transcripts/*.mp3
 data/transcripts/*.json
 *.log
+
+# --- Project ignores ---
+# Virtual env
+venv/
+# Local env vars
+.env
+# Python cache
+__pycache__/
+*.pyc
+# Streamlit cache
+.streamlit/
+# FAISS vector index (generated)
+data/memory/faiss_index/
+# Large audio dumps (keep sample_call.txt)
+data/audio/

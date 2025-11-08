@@ -174,3 +174,20 @@ def qa_stub_answer(question: str, hits: List[Dict[str, Any]]) -> Dict[str, Any]:
         snippets.append(quote)
     answer = "Here’s what I found:\n- " + "\n- ".join(snippets)
     return {"answer": answer, "citations": citations}
+# --- Maintenance helpers ---
+
+def reset_index() -> None:
+    """Delete the FAISS index folder to start fresh."""
+    import shutil
+    if INDEX_PATH.exists():
+        shutil.rmtree(INDEX_PATH)
+
+def index_all(pkgs, overwrite: bool = False) -> int:
+    """
+    Bulk index a list of transcript packages.
+    Returns total chunks added.
+    """
+    total = 0
+    for pkg in pkgs:
+        total += index_transcript(pkg, overwrite=overwrite)
+    return total

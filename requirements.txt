@@ -25,3 +25,6 @@ langchain-huggingface
 sentence-transformers
 # (optional if you want OpenAI embeddings)
 langchain-openai
+reportlab
+Pillow
+pytest

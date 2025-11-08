@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Cache HuggingFace
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-hf-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-hf-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        env:
+          HF_HUB_DISABLE_TELEMETRY: "1"
+
+      - name: Show repo tree (top)
+        run: |
+          ls -la
+          echo "---"
+          ls -la app || true
+          echo "---"
+          ls -la data || true
+          echo "---"
+          find data -maxdepth 2 -type f || true
+
+      - name: Run tests
+        env:
+          OPENAI_API_KEY: ""     # disable paid LLM calls in CI
+          EMBEDDINGS: "hf"       # use local HF embeddings
+          PYTHONPATH: .          # ensure 'app' can be imported
+        run: |
+          pytest -q -ra
